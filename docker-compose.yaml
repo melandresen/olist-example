@@ -1,0 +1,169 @@
+# =============================================================================
+# Airflow 3 - small local setup for the class (based on the official file)
+#
+#   Containers started by "docker compose up -d":
+#     postgres               -> the metadata database (Airflow's memory)
+#     airflow-init           -> one-time setup, then it stops (exit code 0)
+#     airflow-apiserver      -> the web UI on http://localhost:8080
+#     airflow-scheduler      -> decides what runs when; also runs the tasks
+#     airflow-dag-processor  -> reads the Python files in ./dags
+#
+#   Folders shared between your laptop and the containers:
+#     dags/     your DAG files             include/  helper code and SQL files
+#     plugins/  plugins (last part)        data/     files our DAGs write
+#     logs/     the log of every task      config/   Airflow's settings file
+#
+#   For learning only - NOT for production.
+#   Memory: each container has a limit (mem_limit). Together they need
+#   about 1.5-2 GB; give Docker at least 4 GB.
+# =============================================================================
+
+x-airflow-common:
+  &airflow-common
+  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:3.4.0}
+  environment:
+    &airflow-common-env
+    # --- how tasks are run ---------------------------------------------------
+    # LocalExecutor = tasks run inside the scheduler container (no extra worker)
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__PARALLELISM: '4'               # max. 4 tasks at the same time (saves RAM)
+    # --- metadata database ---------------------------------------------------
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg://airflow:airflow@postgres/airflow
+    # --- login: none needed, everybody is admin (local learning only!) -------
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: 'true'
+    # --- the scheduler and the tasks talk to the API server at this address --
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: 'http://airflow-apiserver:8080/execution/'
+    AIRFLOW__API_AUTH__JWT_SECRET: 'local-learning-secret-not-for-production'
+    AIRFLOW__API_AUTH__JWT_ISSUER: airflow
+    AIRFLOW__API__WORKERS: '1'                    # one web-server process (saves RAM)
+    # --- DAG files -----------------------------------------------------------
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'         # show only OUR DAGs
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__DAG_PROCESSOR__REFRESH_INTERVAL: '10'          # look for NEW files every 10 s (default 300 s)
+    AIRFLOW__DAG_PROCESSOR__MIN_FILE_PROCESS_INTERVAL: '10' # re-read CHANGED files every 10 s (default 30 s)
+    AIRFLOW__DAG_PROCESSOR__PARSING_PROCESSES: '1'          # saves RAM
+    # --- include/ folder: lets DAG files do "from include.shop import ..." -----
+    PYTHONPATH: '/opt/airflow'
+    # --- connections: show the "Test" button in Admin -> Connections ---------
+    AIRFLOW__CORE__TEST_CONNECTION: 'Enabled'
+    # --- misc ----------------------------------------------------------------
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    AIRFLOW_CONFIG: '/opt/airflow/config/airflow.cfg'
+    # --- dbt -----------------------------------------------------------------
+    # installs the packages from .env on every container start (quick checks only)
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-}
+    # Snowflake credentials for dbt (values come from .env, see .env.example)
+    SNOWFLAKE_ACCOUNT: ${SNOWFLAKE_ACCOUNT}
+    SNOWFLAKE_USER: ${SNOWFLAKE_USER}
+    SNOWFLAKE_PASSWORD: ${SNOWFLAKE_PASSWORD}
+    # dbt looks for profiles.yml in this folder
+    DBT_PROFILES_DIR: /opt/airflow/olist_dbt
+  volumes:
+    # left = folder on YOUR laptop : right = folder inside the containers
+    - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
+    - ${AIRFLOW_PROJ_DIR:-.}/include:/opt/airflow/include
+    - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
+    - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
+    - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/data:/opt/airflow/data
+    - ${AIRFLOW_PROJ_DIR:-.}/olist_dbt:/opt/airflow/olist_dbt
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    &airflow-common-depends-on
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
+    mem_limit: 512m
+
+  airflow-apiserver:
+    <<: *airflow-common
+    command: api-server
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    mem_limit: 1g
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    # The scheduler also RUNS the tasks (LocalExecutor) and we use it for
+    # CLI commands, so it gets the biggest limit.
+    mem_limit: 1536m
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: always
+    mem_limit: 768m
+    depends_on:
+      <<: *airflow-common-depends-on
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "Creating folders (if missing) and fixing their owner ..."
+        mkdir -p /opt/airflow/{logs,dags,include,plugins,config,data}
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/{logs,dags,include,plugins,config,data}
+        echo "Preparing the metadata database ..."
+        /entrypoint airflow version
+        echo "Writing the default config file (if missing) ..."
+        /entrypoint airflow config list > /dev/null
+        chown -R "${AIRFLOW_UID:-50000}:0" /opt/airflow/config
+        echo "airflow-init finished."
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_MIGRATE: 'true'
+    user: "0:0"
+    mem_limit: 1g
+
+volumes:
+  postgres-db-volume:

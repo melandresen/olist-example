@@ -1,0 +1,61 @@
+models:
+  - name: fact_seller_performance
+    columns:
+      - name: seller_id
+        description: ID of the seller
+        data_tests:
+          - unique
+          - not_null
+      - name: revenue_total
+        description: Total sales value contributed by the seller in USD
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: order_count
+        description: Total number of orders contributed by the seller
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+  - name: fact_orders_geography
+    columns:
+      - name: order_purchase_year
+        description: The year this order was made
+        data_tests:
+          - not_null
+      - name: order_status
+        description: Current status of the order
+        data_tests:
+          - not_null
+      - name: customer_city
+        description: City of residence of the customer
+        data_tests:
+          - not_null
+      - name: customer_state
+        description: State of residence of the customer
+        data_tests:
+          - not_null
+      - name: order_count
+        description: Number of orders for this year, state, city and order status
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+      - name: customer_count
+        description: Number of customers for this year, state, city and order status
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+  - name: fact_product_performance
+    columns:
+      - name: product_category_name
+        data_tests:
+          - not_null
+          - unique
+      - name: total_sales
+        data_tests:
+          - not_null
